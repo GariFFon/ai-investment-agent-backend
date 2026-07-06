@@ -14,36 +14,38 @@ const router = express.Router();
  *  3. Else → run agent → save to MongoDB → return
  */
 router.post('/', async (req, res) => {
-  const { companyName, ticker: preferredTicker } = req.body;
+  const { companyName, ticker: preferredTicker, force = false } = req.body;
 
   if (!companyName?.trim()) {
     return res.status(400).json({ error: 'companyName is required' });
   }
 
   try {
-    // ── Step 1: Check cache ──────────────────────────────────────────────────
-    // If user selected a specific ticker (e.g. "NVDA"), match by exact ticker
-    // to avoid returning a stale result for a different exchange (e.g. "NVD.DE").
-    const cacheQuery = preferredTicker
-      ? { ticker: preferredTicker.toUpperCase() }
-      : { companyName: { $regex: new RegExp(companyName.trim(), 'i') } };
+    // ── Step 1: Check cache (skipped when force=true) ────────────────────────
+    if (!force) {
+      const cacheQuery = preferredTicker
+        ? { ticker: preferredTicker.toUpperCase() }
+        : { companyName: { $regex: new RegExp(companyName.trim(), 'i') } };
 
-    const cached = await Analysis.findOne(cacheQuery).sort({ fetchedAt: -1 });
+      const cached = await Analysis.findOne(cacheQuery).sort({ fetchedAt: -1 });
 
-    if (cached) {
-      console.log(`📦 Cache HIT for "${companyName}" (${cached.ticker})`);
-      return res.json({
-        ...cached.toObject(),
-        cached: true,
-        cachedAt: cached.fetchedAt,
-      });
+      if (cached) {
+        console.log(`📦 Cache HIT for "${companyName}" (${cached.ticker})`);
+        return res.json({
+          ...cached.toObject(),
+          cached: true,
+          cachedAt: cached.fetchedAt,
+        });
+      }
+    } else {
+      console.log(`🔄 Force reanalysis requested for "${companyName}" — skipping cache`);
     }
 
     // ── Step 2: Run agent ────────────────────────────────────────────────────
     console.log(`🤖 Running agent for "${companyName}" (ticker hint: ${preferredTicker || 'none'})...`);
     const analysis = await runAnalysisAgent(companyName.trim(), preferredTicker || null);
 
-    // ── Step 3: Save to MongoDB ──────────────────────────────────────────────
+    // ── Step 3: Save / update MongoDB ───────────────────────────────────────
     const saved = await Analysis.findOneAndUpdate(
       { ticker: analysis.ticker },
       {
@@ -53,7 +55,7 @@ router.post('/', async (req, res) => {
       { upsert: true, new: true }
     );
 
-    console.log(`✅ Saved analysis for ${analysis.ticker}`);
+    console.log(`✅ ${force ? 'Re-saved' : 'Saved'} analysis for ${analysis.ticker}`);
 
     return res.json({ ...saved.toObject(), cached: false });
   } catch (err) {

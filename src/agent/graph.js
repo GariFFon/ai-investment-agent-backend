@@ -16,6 +16,42 @@ export const runAnalysisAgent = async (companyName, preferredTicker = null) => {
   const data = await gatherCompanyData(companyName, preferredTicker);
 
   // ── Step 2: Build a single rich prompt with all data embedded ────────────────
+  // Build Yahoo Finance supplemental section
+  const yahooSection = data.yahooData ? `
+## Analyst Consensus (Yahoo Finance)
+- Recommendation: ${data.yahooData.currentFinancials?.recommendationKey?.toUpperCase() ?? 'N/A'} (mean score: ${data.yahooData.currentFinancials?.recommendationMean ?? 'N/A'}/5, where 1=Strong Buy, 5=Sell)
+- Number of analysts: ${data.yahooData.currentFinancials?.numberOfAnalystOpinions ?? 'N/A'}
+- Price target (mean): $${data.yahooData.currentFinancials?.targetMeanPrice ?? 'N/A'}
+- Price target range: $${data.yahooData.currentFinancials?.targetLowPrice ?? 'N/A'} – $${data.yahooData.currentFinancials?.targetHighPrice ?? 'N/A'}
+
+## Analyst Buy/Sell/Hold Counts (This Month)
+${JSON.stringify(data.yahooData.analystRecommendations?.[0] ?? {}, null, 2)}
+
+## EPS & Revenue Estimates (Next 4 Periods)
+${JSON.stringify(data.yahooData.epsEstimates, null, 2)}
+
+## Quarterly Earnings Beats/Misses
+${JSON.stringify(data.yahooData.earningsHistory, null, 2)}
+
+## Ownership Breakdown
+${JSON.stringify(data.yahooData.ownership, null, 2)}
+
+## Recent Analyst Upgrades/Downgrades
+${JSON.stringify(data.yahooData.analystActions, null, 2)}
+
+## Yahoo Finance Key Statistics
+- Forward P/E: ${data.yahooData.keyStats?.forwardPE ?? 'N/A'}
+- PEG Ratio: ${data.yahooData.keyStats?.pegRatio ?? 'N/A'}
+- Price/Book: ${data.yahooData.keyStats?.priceToBook ?? 'N/A'}
+- Enterprise Value: ${data.yahooData.keyStats?.enterpriseValue ?? 'N/A'}
+- EV/Revenue: ${data.yahooData.keyStats?.enterpriseToRevenue ?? 'N/A'}
+- EV/EBITDA: ${data.yahooData.keyStats?.enterpriseToEbitda ?? 'N/A'}
+- Short % of Float: ${data.yahooData.keyStats?.shortPercentOfFloat ?? 'N/A'}
+- 52-Week Change: ${data.yahooData.keyStats?.weekChange52 ?? 'N/A'}
+- Revenue Growth (YoY): ${data.yahooData.currentFinancials?.revenueGrowth ?? 'N/A'}
+- Earnings Growth (YoY): ${data.yahooData.currentFinancials?.earningsGrowth ?? 'N/A'}
+` : '\n## Yahoo Finance\nData unavailable for this ticker.\n';
+
   const dataPrompt = `
 You are analyzing the company "${companyName}" (Ticker: ${data.ticker}).
 
@@ -33,7 +69,7 @@ ${JSON.stringify(data.balanceSheet, null, 2)}
 ## Cash Flow Statement (Last 3 Years)
 ${JSON.stringify(data.cashFlow, null, 2)}
 
-## Key Metrics & Valuation Ratios
+## Key Metrics & Valuation Ratios (FMP)
 ${JSON.stringify(data.keyMetrics, null, 2)}
 
 ## Recent News (Last 8 Articles)
@@ -41,7 +77,7 @@ ${JSON.stringify(data.recentNews, null, 2)}
 
 ## Peer Companies
 ${JSON.stringify(data.peers)}
-
+${yahooSection}
 ---
 
 Now produce your complete investment analysis as a single valid JSON object matching the format specified in your instructions. Output only the JSON with no extra text or markdown.

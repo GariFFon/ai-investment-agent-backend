@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { fetchYahooData } from './yahooService.js';
 
 const FMP_BASE = 'https://financialmodelingprep.com/stable';
 const key = () => process.env.FMP_API_KEY;
@@ -99,20 +100,79 @@ const fetchAllData = async (ticker) => {
     dividendsPaid: d.dividendsPaid,
   }));
 
+  // 🔍 DEBUG: log raw keys so we can verify field names (remove after confirming)
+  const metricsRaw0 = Array.isArray(metricsRaw) ? metricsRaw[0] : metricsRaw;
+  const ratiosRaw0  = Array.isArray(ratiosRaw)  ? ratiosRaw[0]  : ratiosRaw;
+  console.log('📊 key-metrics keys:', Object.keys(metricsRaw0 || {}).join(', '));
+  console.log('📊 ratios keys:', Object.keys(ratiosRaw0 || {}).join(', '));
+  console.log('📊 key-metrics sample:', JSON.stringify({
+    evToEBITDA:    metricsRaw0?.evToEBITDA,
+    evToSales:     metricsRaw0?.evToSales,
+    returnOnEquity:metricsRaw0?.returnOnEquity,
+    returnOnAssets:metricsRaw0?.returnOnAssets,
+    dividendYield: metricsRaw0?.dividendYield,
+  }));
+  console.log('📊 ratios sample:', JSON.stringify({
+    priceEarningsRatio: ratiosRaw0?.priceEarningsRatio,
+    priceToBookRatio:   ratiosRaw0?.priceToBookRatio,
+    debtEquityRatio:    ratiosRaw0?.debtEquityRatio,
+    interestCoverage:   ratiosRaw0?.interestCoverage,
+    payoutRatio:        ratiosRaw0?.payoutRatio,
+  }));
+
   // Normalize key metrics & ratios
-  const m = (Array.isArray(metricsRaw) ? metricsRaw[0] : metricsRaw) || {};
+  // NOTE: FMP /stable/key-metrics field names differ from legacy API
+  const m = metricsRaw0 || {};
   const r = (Array.isArray(ratiosRaw) ? ratiosRaw[0] : ratiosRaw) || {};
   const keyMetrics = {
-    peRatio: m.peRatio,
-    pbRatio: m.pbRatio,
-    evToEbitda: m.enterpriseValueOverEBITDA,
-    priceToSales: m.priceToSalesRatio,
-    debtToEquity: m.debtToEquity,
-    roe: r.returnOnEquity,
-    roa: r.returnOnAssets,
-    interestCoverage: r.interestCoverage,
-    dividendYield: m.dividendYield,
-    payoutRatio: r.payoutRatio,
+    // Valuation
+    peRatio:                  r.priceEarningsRatio          ?? r.peRatio,
+    pbRatio:                  r.priceToBookRatio            ?? r.pbRatio,
+    priceToSales:             r.priceSalesRatio             ?? r.priceToSalesRatio ?? m.evToSales,
+    evToEbitda:               m.evToEBITDA                  ?? m.enterpriseValueOverEBITDA,
+    evToSales:                m.evToSales,
+    evToFreeCashFlow:         m.evToFreeCashFlow,
+    evToOperatingCashFlow:    m.evToOperatingCashFlow,
+    grahamNumber:             m.grahamNumber,
+    grahamNetNet:             m.grahamNetNet,
+    earningsYield:            m.earningsYield,
+    freeCashFlowYield:        m.freeCashFlowYield,
+    // Profitability
+    roe:                      m.returnOnEquity              ?? r.returnOnEquity,
+    roa:                      m.returnOnAssets              ?? r.returnOnAssets,
+    returnOnInvestedCapital:  m.returnOnInvestedCapital,
+    returnOnCapitalEmployed:  m.returnOnCapitalEmployed,
+    returnOnTangibleAssets:   m.returnOnTangibleAssets,
+    incomeQuality:            m.incomeQuality,
+    // Leverage & Coverage
+    debtToEquity:             r.debtEquityRatio             ?? r.debtToEquityRatio ?? m.debtToEquity,
+    netDebtToEBITDA:          m.netDebtToEBITDA,
+    interestCoverage:         r.interestCoverage            ?? m.interestCoverage,
+    interestBurden:           m.interestBurden,
+    taxBurden:                m.taxBurden,
+    // Liquidity
+    currentRatio:             m.currentRatio                ?? r.currentRatio,
+    quickRatio:               m.quickRatio                  ?? r.quickRatio,
+    workingCapital:           m.workingCapital,
+    // Dividends
+    dividendYield:            m.dividendYield               ?? r.dividendYield,
+    payoutRatio:              r.payoutRatio                 ?? m.payoutRatio,
+    dividendPerShare:         m.dividendPerShare            ?? r.dividendPerShare,
+    // Efficiency & CapEx
+    capexToRevenue:                          m.capexToRevenue,
+    capexToOperatingCashFlow:               m.capexToOperatingCashFlow,
+    capexToDepreciation:                    m.capexToDepreciation,
+    salesGeneralAndAdministrativeToRevenue: m.salesGeneralAndAdministrativeToRevenue,
+    researchAndDevelopementToRevenue:       m.researchAndDevelopementToRevenue,
+    stockBasedCompensationToRevenue:        m.stockBasedCompensationToRevenue,
+    daysOfSalesOutstanding:                 m.daysOfSalesOutstanding,
+    daysOfPayablesOutstanding:              m.daysOfPayablesOutstanding,
+    daysOfInventoryOutstanding:             m.daysOfInventoryOutstanding,
+    operatingCycle:                         m.operatingCycle,
+    cashConversionCycle:                    m.cashConversionCycle,
+    tangibleAssetValue:                     m.tangibleAssetValue,
+    netCurrentAssetValue:                   m.netCurrentAssetValue,
+    investedCapital:                        m.investedCapital,
   };
 
   // Normalize news
@@ -144,7 +204,7 @@ const fetchAllData = async (ticker) => {
 };
 
 /**
- * Main export: resolve company name → fetch all data in parallel
+ * Main export: resolve company name → fetch all data in parallel from FMP + Yahoo
  * @param {string} companyName - Human-readable company name
  * @param {string|null} preferredTicker - If user already selected a specific symbol, skip search
  */
@@ -159,9 +219,31 @@ export const gatherCompanyData = async (companyName, preferredTicker = null) => 
     console.log(`✅ Ticker resolved: ${ticker}`);
   }
 
-  console.log(`📊 Fetching all FMP data for ${ticker} in parallel...`);
-  const data = await fetchAllData(ticker);
-  console.log(`✅ All FMP data fetched for ${ticker}`);
+  // Fetch FMP + Yahoo Finance data in parallel
+  console.log(`📊 Fetching FMP + Yahoo Finance data for ${ticker} in parallel...`);
+  const [fmpData, yahooData] = await Promise.all([
+    fetchAllData(ticker),
+    fetchYahooData(ticker).catch((err) => {
+      console.warn(`⚠️ Yahoo Finance fetch failed, continuing with FMP only: ${err.message}`);
+      return null;
+    }),
+  ]);
+  console.log(`✅ All data fetched for ${ticker} (Yahoo: ${yahooData ? '✅' : '❌ unavailable'})`);
 
-  return data;
+  // Merge: FMP is primary, Yahoo fills gaps and adds extra data
+  return {
+    ...fmpData,
+    // Override description with Yahoo's longer version if FMP description is short
+    companyProfile: {
+      ...fmpData.companyProfile,
+      description: (
+        fmpData.companyProfile?.description?.length > 100
+          ? fmpData.companyProfile.description
+          : yahooData?.profile?.description
+      ) ?? fmpData.companyProfile?.description,
+      employees: fmpData.companyProfile?.employees ?? yahooData?.profile?.employees,
+    },
+    // Yahoo-exclusive enriched data (analyst intelligence, ownership, earnings beats)
+    yahooData: yahooData ?? null,
+  };
 };
