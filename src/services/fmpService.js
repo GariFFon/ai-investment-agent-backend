@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { fetchYahooData } from './yahooService.js';
+import { fetchEdgarData } from './edgarService.js';
 
 const FMP_BASE = 'https://financialmodelingprep.com/stable';
 const key = () => process.env.FMP_API_KEY;
@@ -203,8 +204,160 @@ const fetchAllData = async (ticker) => {
   };
 };
 
+// ── Cross-source comparison builder ──────────────────────────────────────────
 /**
- * Main export: resolve company name → fetch all data in parallel from FMP + Yahoo
+ * For each overlapping data point, compare values across FMP, Yahoo, and EDGAR.
+ * Returns an object of comparison items with agreement level.
+ */
+const buildCrossSourceComparison = (fmpData, yahooData, edgarData) => {
+  const yfc = yahooData?.currentFinancials ?? {};
+  const yfk = yahooData?.keyStats ?? {};
+  const ef  = edgarData?.facts ?? {};
+  const income = fmpData.incomeStatement?.[0] ?? {};
+  const balance = fmpData.balanceSheet?.[0] ?? {};
+  const cashflow = fmpData.cashFlow?.[0] ?? {};
+  const km = fmpData.keyMetrics ?? {};
+
+  // Agreement thresholds
+  const agreement = (vals) => {
+    const nums = vals.filter((v) => v != null && !isNaN(v));
+    if (nums.length < 2) return 'SINGLE';
+    const max = Math.max(...nums);
+    const min = Math.min(...nums);
+    if (max === 0) return 'HIGH';
+    const spread = (max - min) / Math.abs(max);
+    if (spread <= 0.02) return 'HIGH';
+    if (spread <= 0.10) return 'MEDIUM';
+    return 'LOW';
+  };
+
+  const makePoint = (label, fmp, yahoo, edgar, fmt = 'currency') => ({
+    label,
+    fmp:   fmp   ?? null,
+    yahoo: yahoo ?? null,
+    edgar: edgar ?? null,
+    agreement: agreement([fmp, yahoo, edgar]),
+    format: fmt,
+    // Best display value: prefer EDGAR (official) > FMP > Yahoo
+    displayValue: edgar ?? fmp ?? yahoo ?? null,
+  });
+
+  return {
+    revenue: makePoint(
+      'Revenue (Latest FY)',
+      income.revenue,
+      yfc.totalRevenue,
+      ef.latestRevenue,
+    ),
+    netIncome: makePoint(
+      'Net Income (Latest FY)',
+      income.netIncome,
+      yfc.grossProfits ? null : null, // Yahoo doesn't expose net income directly
+      ef.latestNetIncome,
+    ),
+    grossProfit: makePoint(
+      'Gross Profit (Latest FY)',
+      income.grossProfit,
+      yfc.grossProfits,
+      ef.latestGrossProfit,
+    ),
+    operatingIncome: makePoint(
+      'Operating Income (Latest FY)',
+      income.operatingIncome,
+      null,
+      ef.latestOperatingIncome,
+    ),
+    ebitda: makePoint(
+      'EBITDA (Latest FY)',
+      income.ebitda,
+      yfc.ebitda,
+      null,
+    ),
+    eps: makePoint(
+      'EPS Diluted (Latest FY)',
+      income.eps,
+      yfk.trailingEps,
+      ef.latestEpsDiluted,
+      'number',
+    ),
+    totalAssets: makePoint(
+      'Total Assets (Latest FY)',
+      balance.totalAssets,
+      null,
+      ef.latestAssets,
+    ),
+    totalLiabilities: makePoint(
+      'Total Liabilities (Latest FY)',
+      balance.totalLiabilities,
+      yfc.totalDebt, // Yahoo only has total debt, not liabilities — note the label
+      ef.latestLiabilities,
+    ),
+    operatingCashFlow: makePoint(
+      'Operating Cash Flow (Latest FY)',
+      cashflow.operatingCashFlow,
+      yfc.operatingCashflow,
+      ef.latestOperatingCF,
+    ),
+    debtToEquity: makePoint(
+      'Debt/Equity Ratio',
+      km.debtToEquity,
+      yfc.debtToEquity,
+      null,
+      'number',
+    ),
+    roe: makePoint(
+      'Return on Equity (ROE)',
+      km.roe,
+      yfc.returnOnEquity,
+      null,
+      'percent',
+    ),
+    roa: makePoint(
+      'Return on Assets (ROA)',
+      km.roa,
+      yfc.returnOnAssets,
+      null,
+      'percent',
+    ),
+    grossMargin: makePoint(
+      'Gross Margin',
+      income.grossMargin,
+      yfc.grossMargins,
+      null,
+      'percent',
+    ),
+    operatingMargin: makePoint(
+      'Operating Margin',
+      income.operatingMargin,
+      yfc.operatingMargins,
+      null,
+      'percent',
+    ),
+    netMargin: makePoint(
+      'Net Profit Margin',
+      income.netMargin,
+      yfc.profitMargins,
+      null,
+      'percent',
+    ),
+    rdExpense: makePoint(
+      'R&D Expense (Latest FY)',
+      null, // FMP doesn't expose R&D directly in key metrics
+      null,
+      ef.latestRD,
+    ),
+    sharesOutstanding: makePoint(
+      'Shares Outstanding',
+      null,
+      yfk.sharesOutstanding,
+      ef.latestShares,
+      'shares',
+    ),
+  };
+};
+
+/**
+ * Main export: resolve company name → fetch all data in parallel from FMP + Yahoo + EDGAR
  * @param {string} companyName - Human-readable company name
  * @param {string|null} preferredTicker - If user already selected a specific symbol, skip search
  */
@@ -219,16 +372,26 @@ export const gatherCompanyData = async (companyName, preferredTicker = null) => 
     console.log(`✅ Ticker resolved: ${ticker}`);
   }
 
-  // Fetch FMP + Yahoo Finance data in parallel
-  console.log(`📊 Fetching FMP + Yahoo Finance data for ${ticker} in parallel...`);
-  const [fmpData, yahooData] = await Promise.all([
+  // Fetch FMP + Yahoo Finance + SEC EDGAR data all in parallel
+  console.log(`📊 Fetching FMP + Yahoo Finance + SEC EDGAR data for ${ticker} in parallel...`);
+  const [fmpData, yahooData, edgarData] = await Promise.all([
     fetchAllData(ticker),
     fetchYahooData(ticker).catch((err) => {
-      console.warn(`⚠️ Yahoo Finance fetch failed, continuing with FMP only: ${err.message}`);
+      console.warn(`⚠️ Yahoo Finance fetch failed, continuing without it: ${err.message}`);
+      return null;
+    }),
+    fetchEdgarData(ticker).catch((err) => {
+      console.warn(`⚠️ SEC EDGAR fetch failed, continuing without it: ${err.message}`);
       return null;
     }),
   ]);
-  console.log(`✅ All data fetched for ${ticker} (Yahoo: ${yahooData ? '✅' : '❌ unavailable'})`);
+  console.log(
+    `✅ All data fetched for ${ticker}` +
+    ` (Yahoo: ${yahooData ? '✅' : '❌'}, EDGAR: ${edgarData ? '✅' : '❌ (non-US or unavailable)'})`
+  );
+
+  // Build cross-source comparison
+  const crossSource = buildCrossSourceComparison(fmpData, yahooData, edgarData);
 
   // Merge: FMP is primary, Yahoo fills gaps and adds extra data
   return {
@@ -245,5 +408,9 @@ export const gatherCompanyData = async (companyName, preferredTicker = null) => 
     },
     // Yahoo-exclusive enriched data (analyst intelligence, ownership, earnings beats)
     yahooData: yahooData ?? null,
+    // SEC EDGAR official filing data
+    edgarData: edgarData ?? null,
+    // Cross-source comparison (agreement levels for overlapping data points)
+    crossSource,
   };
 };

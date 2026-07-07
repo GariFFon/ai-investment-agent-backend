@@ -52,6 +52,54 @@ ${JSON.stringify(data.yahooData.analystActions, null, 2)}
 - Earnings Growth (YoY): ${data.yahooData.currentFinancials?.earningsGrowth ?? 'N/A'}
 ` : '\n## Yahoo Finance\nData unavailable for this ticker.\n';
 
+  // Build SEC EDGAR supplemental section
+  const edgarFacts = data.edgarData?.facts;
+  const edgarFilings = data.edgarData?.filings;
+  const edgarSection = data.edgarData ? `
+## SEC EDGAR (Official US Government Filings)
+Entity Name: ${edgarFacts?.entityName ?? 'N/A'}
+CIK: ${data.edgarData.cik}
+
+### Revenue History (Annual, from 10-K filings)
+${JSON.stringify(edgarFacts?.revenueHistory?.slice(0, 5) ?? [], null, 2)}
+
+### Net Income History (Annual)
+${JSON.stringify(edgarFacts?.netIncomeHistory?.slice(0, 5) ?? [], null, 2)}
+
+### EPS Diluted History (Annual)
+${JSON.stringify(edgarFacts?.epsDilutedHistory?.slice(0, 5) ?? [], null, 2)}
+
+### R&D Expense History (Annual)
+${JSON.stringify(edgarFacts?.rdHistory?.slice(0, 5) ?? [], null, 2)}
+
+### Operating Cash Flow History (Annual)
+${JSON.stringify(edgarFacts?.operatingCFHistory?.slice(0, 5) ?? [], null, 2)}
+
+### Total Assets History (Annual)
+${JSON.stringify(edgarFacts?.assetsHistory?.slice(0, 3) ?? [], null, 2)}
+
+### Shares Outstanding History (Annual)
+${JSON.stringify(edgarFacts?.sharesHistory?.slice(0, 3) ?? [], null, 2)}
+
+### Latest Filings
+- Latest 10-K: ${edgarFilings?.latest10K?.date ?? 'N/A'} (Annual Report)
+- Latest 10-Q: ${edgarFilings?.latest10Q?.date ?? 'N/A'} (Quarterly Report)
+- Recent 8-Ks (last 90 days): ${edgarFilings?.recent8Ks?.length ?? 0}
+` : '\n## SEC EDGAR\nData unavailable (likely non-US company).\n';
+
+  // Build cross-source comparison summary for Gemini
+  const cs = data.crossSource ?? {};
+  const lowAgreements = Object.values(cs).filter(p => p.agreement === 'LOW');
+  const crossSourceSection = `
+## Cross-Source Data Agreement Summary
+Data was collected from up to 3 sources: FMP, Yahoo Finance, and SEC EDGAR.
+${
+  lowAgreements.length > 0
+    ? `⚠️ LOW AGREEMENT detected on: ${lowAgreements.map(p => p.label).join(', ')}. Consider mentioning data confidence caveats.`
+    : '✅ All overlapping data points show HIGH or MEDIUM agreement across sources. Data is reliable.'
+}
+`;
+
   const dataPrompt = `
 You are analyzing the company "${companyName}" (Ticker: ${data.ticker}).
 
@@ -78,6 +126,8 @@ ${JSON.stringify(data.recentNews, null, 2)}
 ## Peer Companies
 ${JSON.stringify(data.peers)}
 ${yahooSection}
+${edgarSection}
+${crossSourceSection}
 ---
 
 Now produce your complete investment analysis as a single valid JSON object matching the format specified in your instructions. Output only the JSON with no extra text or markdown.
