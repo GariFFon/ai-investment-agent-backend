@@ -31,8 +31,8 @@ const analysisSchema = new mongoose.Schema({
   rawData: { type: mongoose.Schema.Types.Mixed },  // full FMP response cached
 });
 
-// Auto-delete documents 24 hours after fetchedAt
-analysisSchema.index({ fetchedAt: 1 }, { expireAfterSeconds: 86400 });
+// Auto-delete documents 30 days after fetchedAt (2592000s = 30 days)
+analysisSchema.index({ fetchedAt: 1 }, { expireAfterSeconds: 2592000 });
 
 // Unique per ticker (upsert on re-fetch)
 analysisSchema.index({ ticker: 1 });
