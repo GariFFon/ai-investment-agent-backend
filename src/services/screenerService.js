@@ -1,4 +1,5 @@
 import axios from 'axios';
+import * as cheerio from 'cheerio';
 
 const SCREENER_BASE = 'https://www.screener.in';
 
@@ -12,286 +13,419 @@ const toScreenerSymbol = (ticker) =>
 const SCREENER_HEADERS = {
   'User-Agent':
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  Accept: 'application/json',
+  Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language': 'en-US,en;q=0.9',
   Referer: 'https://www.screener.in/',
 };
 
-/**
- * Step 1: Search Screener.in for a symbol to get the correct company slug.
- * Returns the best-match slug string (e.g. "PNB", "RELIANCE").
- *
- * Matching priority:
- *   1. URL slug exactly matches the NSE symbol (e.g. /company/PNB/ for "PNB")
- *   2. URL slug starts with the symbol (e.g. /company/PNBHOUSING/ would NOT match "PNB")
- *   3. First result as fallback
- */
+/* ─────────────────────────────────────────────────────────────────────────────
+   Step 1: Search Screener.in for a symbol to get the correct company slug.
+   The search API (/api/company/search/) still works.
+───────────────────────────────────────────────────────────────────────────── */
 const resolveScreenerSlug = async (symbol) => {
   const searchUrl = `${SCREENER_BASE}/api/company/search/?q=${encodeURIComponent(symbol)}`;
   console.log(`🔎 Screener.in search: ${searchUrl}`);
   try {
     const { data } = await axios.get(searchUrl, {
-      headers: SCREENER_HEADERS,
+      headers: { ...SCREENER_HEADERS, Accept: 'application/json' },
       timeout: 10000,
     });
-    // data is an array like: [{ name: "Punjab National Bank", url: "/company/PNB/" }, ...]
-    if (!Array.isArray(data) || data.length === 0) return symbol;
+    if (!Array.isArray(data) || data.length === 0) return { slug: symbol, consolidated: false };
 
-    // Extract just the company symbol from the URL path.
-    // URL can be "/company/PNB/" or "/company/PNBHOUSING/consolidated/"
-    // We only want the first path segment after /company/, e.g. "PNB" or "PNBHOUSING"
     const extractSlug = (url) =>
       url?.replace(/^\/company\//, '').split('/')[0]?.toUpperCase() || null;
 
-    // Priority 1: exact slug match (e.g. slug "PNB" === symbol "PNB")
-    const exactSlugMatch = data.find(
+    const isConsolidated = (url) => url?.includes('/consolidated/');
+
+    // Priority 1: exact slug match
+    const exactMatch = data.find(
       (r) => extractSlug(r.url) === symbol.toUpperCase()
     );
-
-    // Priority 2: first result (Screener's own ranking)
-    const best = exactSlugMatch || data[0];
+    const best = exactMatch || data[0];
     const slug = extractSlug(best.url) || symbol;
+    const consolidated = isConsolidated(best.url);
 
-    console.log(`✅ Screener.in resolved slug: "${symbol}" → "${slug}" (from "${best.name}")`);
-    return slug;
+    console.log(`✅ Screener.in resolved slug: "${symbol}" → "${slug}" (consolidated: ${consolidated}, from "${best.name}")`);
+    return { slug, consolidated };
   } catch (err) {
     console.warn(`⚠️ Screener.in search failed for ${symbol}: ${err.message}. Using raw symbol.`);
-    return symbol;
+    return { slug: symbol, consolidated: false };
   }
 };
 
-/**
- * Step 2: Fetch company JSON from Screener.in using the resolved slug.
- * Tries /consolidated/ first (preferred for large Indian companies),
- * falls back to plain slug if consolidated returns 404.
- */
-const screenerGet = async (slug) => {
-  // Try consolidated first
-  const consolidatedUrl = `${SCREENER_BASE}/api/company/${encodeURIComponent(slug)}/consolidated/`;
-  console.log(`📡 Screener.in GET (consolidated): ${consolidatedUrl}`);
-  try {
-    const { data } = await axios.get(consolidatedUrl, {
-      headers: SCREENER_HEADERS,
-      timeout: 15000,
-    });
-    if (data && data.id) return data; // valid response
-  } catch (err) {
-    if (err.response?.status !== 404) throw err; // only swallow 404
-    console.warn(`⚠️ Screener.in: consolidated not found for ${slug}, trying standalone...`);
+/* ─────────────────────────────────────────────────────────────────────────────
+   Step 2: Fetch the HTML company page (NOT /api/ — that's dead).
+   Tries /company/{slug}/consolidated/ first, falls back to /company/{slug}/
+───────────────────────────────────────────────────────────────────────────── */
+const fetchScreenerHTML = async (slug, preferConsolidated = true) => {
+  const urls = preferConsolidated
+    ? [
+        `${SCREENER_BASE}/company/${encodeURIComponent(slug)}/consolidated/`,
+        `${SCREENER_BASE}/company/${encodeURIComponent(slug)}/`,
+      ]
+    : [
+        `${SCREENER_BASE}/company/${encodeURIComponent(slug)}/`,
+        `${SCREENER_BASE}/company/${encodeURIComponent(slug)}/consolidated/`,
+      ];
+
+  for (const url of urls) {
+    console.log(`📡 Screener.in GET (HTML): ${url}`);
+    try {
+      const { data, status } = await axios.get(url, {
+        headers: SCREENER_HEADERS,
+        timeout: 20000,
+      });
+      if (status === 200 && typeof data === 'string' && data.includes('id="top-ratios"')) {
+        return data;
+      }
+    } catch (err) {
+      if (err.response?.status === 404) {
+        console.warn(`⚠️ Screener.in: ${url} returned 404, trying next...`);
+        continue;
+      }
+      throw err;
+    }
   }
-
-  // Fall back to standalone
-  const standaloneUrl = `${SCREENER_BASE}/api/company/${encodeURIComponent(slug)}/`;
-  console.log(`📡 Screener.in GET (standalone): ${standaloneUrl}`);
-  const { data } = await axios.get(standaloneUrl, {
-    headers: SCREENER_HEADERS,
-    timeout: 15000,
-  });
-  return data;
+  return null;
 };
 
-/**
- * Parse a Screener.in consolidated/standalone financial table.
- * Each table entry looks like: { name, values: [{ value, tooltip }] }
- * The headers are a separate array of year labels.
- */
-const parseTable = (headers, rows) => {
-  if (!Array.isArray(headers) || !Array.isArray(rows)) return [];
-  return headers.map((year, i) => {
-    const entry = { year: String(year).trim() };
-    rows.forEach((row) => {
-      const key = String(row.name || '').trim();
-      const val = row.values?.[i]?.value;
-      // Convert "1,23,456" Indian-formatted numbers to plain numbers
-      const parsed = typeof val === 'string'
-        ? parseFloat(val.replace(/,/g, ''))
-        : val;
-      entry[key] = isNaN(parsed) ? val : parsed;
-    });
-    return entry;
-  });
+/* ─────────────────────────────────────────────────────────────────────────────
+   HTML Parsing Helpers
+───────────────────────────────────────────────────────────────────────────── */
+
+/** Parse an Indian-formatted number string like "1,23,456.78" → 123456.78 */
+const parseIndianNum = (text) => {
+  if (text == null) return null;
+  const cleaned = String(text).replace(/,/g, '').replace(/₹/g, '').trim();
+  if (cleaned === '' || cleaned === '—' || cleaned === '-') return null;
+  const num = parseFloat(cleaned);
+  return isNaN(num) ? null : num;
 };
 
-/**
- * Safely find a row by name (partial, case-insensitive match)
- */
-const findRow = (rows, name) =>
-  (rows || []).find((r) =>
-    String(r.name || '').toLowerCase().includes(name.toLowerCase())
-  );
-
-/**
- * Convert Screener.in Cr (crore) values to absolute numbers.
- * 1 Crore = 10,000,000
- */
+/** Convert Screener.in Cr (crore) values to absolute numbers. 1 Crore = 10,000,000 */
 const crToAbs = (val) => (val != null && !isNaN(val) ? val * 1e7 : null);
 
 /**
- * Main fetch function for Indian companies via Screener.in
- * @param {string} ticker - Ticker with or without .NS/.BO suffix
- * @returns {object} Normalized data matching US pipeline shape
+ * Parse a Screener.in data table by its section ID.
+ * Returns { headers: string[], rows: { name, values: number[] }[] }
  */
-export const fetchScreenerData = async (ticker) => {
-  const symbol = toScreenerSymbol(ticker);
-  console.log(`🇮🇳 Screener.in: Fetching data for ${symbol} (from ${ticker})...`);
+const parseDataTable = ($, sectionId) => {
+  const section = $(`#${sectionId}`).closest('section');
+  if (!section.length) return { headers: [], rows: [] };
 
-  // Step 1: Resolve the correct Screener.in slug (avoids 404s for tickers like PNB, HDFCAMC, etc.)
-  const slug = await resolveScreenerSlug(symbol);
+  const table = section.find('table.data-table').first();
+  if (!table.length) return { headers: [], rows: [] };
 
-  let raw;
-  try {
-    raw = await screenerGet(slug);
-  } catch (err) {
-    console.warn(`⚠️ Screener.in fetch failed for ${slug}: ${err.message}`);
-    return null;
-  }
+  // Parse headers (year labels)
+  const headers = [];
+  table.find('thead th').each((i, el) => {
+    const text = $(el).text().trim();
+    if (text && i > 0) headers.push(text); // skip first empty header cell
+  });
 
-  if (!raw || raw.detail === 'Not found.') {
-    console.warn(`⚠️ Screener.in: Company not found for symbol ${symbol}`);
-    return null;
-  }
+  // Parse data rows
+  const rows = [];
+  table.find('tbody tr').each((_, tr) => {
+    const tds = $(tr).find('td');
+    if (tds.length < 2) return;
 
-  // ── 1. Company Profile ────────────────────────────────────────────────────
+    const name = $(tds[0]).text().replace(/[+\s]+$/g, '').trim();
+    const values = [];
+    tds.slice(1).each((_, td) => {
+      values.push(parseIndianNum($(td).text()));
+    });
+    if (name) rows.push({ name, values });
+  });
+
+  return { headers, rows };
+};
+
+/**
+ * Find a row by partial name match (case-insensitive)
+ */
+const findRow = (rows, name) =>
+  rows.find((r) => r.name.toLowerCase().includes(name.toLowerCase()));
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Step 3: Parse all data sections from HTML
+───────────────────────────────────────────────────────────────────────────── */
+const parseScreenerHTML = ($, ticker) => {
+  // ── 1. Top Ratios (key-value list) ──────────────────────────────────────
+  const topRatios = {};
+  $('#top-ratios li, [id="top-ratios"] li').each((_, li) => {
+    const name = $(li).find('.name').text().trim();
+    const valueText = $(li).find('.value .number').map((_, el) => $(el).text().trim()).get();
+    if (name && valueText.length > 0) {
+      topRatios[name] = parseIndianNum(valueText[0]);
+      // For "High / Low", store both values
+      if (name === 'High / Low' && valueText.length >= 2) {
+        topRatios['52W High'] = parseIndianNum(valueText[0]);
+        topRatios['52W Low'] = parseIndianNum(valueText[1]);
+      }
+    }
+  });
+  console.log(`   📊 Top ratios parsed: ${Object.keys(topRatios).length} items`);
+
+  // ── 2. Company Info ──────────────────────────────────────────────────────
+  const companyName = $('h1').first().text().trim() || null;
+  const description = $('.company-description .about p, .company-profile .about p').first().text().trim() || null;
+
   const companyProfile = {
-    name:        raw.name,
+    name: companyName,
     ticker,
-    exchange:    ticker.endsWith('.BO') ? 'BSE' : 'NSE',
-    sector:      raw.sector_name || raw.sector || null,
-    industry:    raw.industry_name || raw.industry || null,
-    description: raw.description || null,
-    website:     raw.website || null,
-    marketCap:   crToAbs(raw.market_cap),
-    price:       raw.current_price,
-    country:     'India',
-    employees:   null, // Not provided by Screener.in
-    ceo:         null, // Not provided by Screener.in
-    ipoDate:     null,
-    beta:        null,
-    currency:    'INR',
+    exchange: ticker.endsWith('.BO') ? 'BSE' : 'NSE',
+    sector: null,
+    industry: null,
+    description,
+    website: null,
+    marketCap: crToAbs(topRatios['Market Cap']),
+    price: topRatios['Current Price'],
+    country: 'India',
+    employees: null,
+    ceo: null,
+    ipoDate: null,
+    beta: null,
+    currency: 'INR',
   };
 
-  // ── 2. Income Statement ───────────────────────────────────────────────────
-  // Screener stores financials in raw.results (consolidated or standalone)
-  // Structure: { years: [...], income: [...], balance: [...], cash_flows: [...], ratios: [...] }
-  const financials = raw.results?.[0] || {};
-  const incomeYears  = financials.yearly_income_statement?.headers || [];
-  const incomeRows   = financials.yearly_income_statement?.rows || [];
+  // Try to extract sector/industry from breadcrumbs or company info section
+  const companyInfo = $('#company-info').closest('section');
+  if (companyInfo.length) {
+    const links = companyInfo.find('a');
+    links.each((_, a) => {
+      const href = $(a).attr('href') || '';
+      const text = $(a).text().trim();
+      if (href.includes('/sector/')) companyProfile.sector = text;
+      if (href.includes('/industry/')) companyProfile.industry = text;
+    });
+  }
 
-  // Also try the top-level structure Screener uses in some responses
-  const altIncome = raw.income_statements || {};
+  // ── 3. Annual Income Statement (Profit & Loss) ─────────────────────────
+  const pl = parseDataTable($, 'profit-loss');
+  const incomeStatement = pl.headers.map((year, i) => {
+    const getVal = (name) => findRow(pl.rows, name)?.values[i] ?? null;
+    const sales = getVal('Sales');
+    const opProfit = getVal('Operating Profit');
+    const netProfit = getVal('Net Profit');
+    const opm = getVal('OPM');
+    const eps = getVal('EPS');
 
-  const incomeStatement = incomeYears.length > 0
-    ? parseTable(incomeYears, incomeRows).map((d) => ({
-        year:             d.year,
-        revenue:          crToAbs(d['Sales'] ?? d['Revenue from Operations'] ?? d['Net Sales']),
-        grossProfit:      null, // Not directly available; computed below
-        grossMargin:      null,
-        operatingIncome:  crToAbs(d['Operating Profit'] ?? d['EBIT']),
-        operatingMargin:  d['OPM %'] != null ? d['OPM %'] / 100 : null,
-        netIncome:        crToAbs(d['Net Profit'] ?? d['Profit after tax'] ?? d['PAT']),
-        netMargin:        null, // Computed from ratio rows
-        eps:              d['EPS in Rs'] ?? d['EPS'] ?? null,
-        ebitda:           crToAbs(d['Operating Profit'] ?? null),
-      })).slice(0, 5)
-    : [];
+    return {
+      year,
+      revenue: crToAbs(sales),
+      grossProfit: null,
+      grossMargin: null,
+      operatingIncome: crToAbs(opProfit),
+      operatingMargin: opm != null ? opm / 100 : null,
+      netIncome: crToAbs(netProfit),
+      netMargin: sales && netProfit ? netProfit / sales : null,
+      eps: eps,
+      ebitda: crToAbs(opProfit), // Screener uses OP as proxy
+    };
+  }).slice(-5); // last 5 years
+  console.log(`   📈 Income statement: ${incomeStatement.length} years`);
 
-  // ── 3. Balance Sheet ──────────────────────────────────────────────────────
-  const balanceYears = financials.yearly_balance_sheet?.headers || [];
-  const balanceRows  = financials.yearly_balance_sheet?.rows || [];
+  // ── 4. Balance Sheet ───────────────────────────────────────────────────
+  const bs = parseDataTable($, 'balance-sheet');
+  const balanceSheet = bs.headers.map((year, i) => {
+    const getVal = (name) => findRow(bs.rows, name)?.values[i] ?? null;
+    return {
+      year,
+      totalAssets: crToAbs(getVal('Total Assets') ?? getVal('Balance Sheet Total')),
+      totalDebt: crToAbs(getVal('Borrowings') ?? getVal('Total Debt')),
+      totalEquity: crToAbs(getVal('Total Equity') ?? getVal("Shareholders' Funds") ?? getVal('Share Capital')),
+      totalLiabilities: crToAbs(getVal('Total Liabilities')),
+      cash: crToAbs(getVal('Cash Equivalents') ?? getVal('Cash & Bank')),
+      currentRatio: null,
+    };
+  }).slice(-5);
+  console.log(`   🏦 Balance sheet: ${balanceSheet.length} years`);
 
-  const balanceSheet = balanceYears.length > 0
-    ? parseTable(balanceYears, balanceRows).map((d) => ({
-        year:           d.year,
-        totalAssets:    crToAbs(d['Total Assets'] ?? d['Balance Sheet Total']),
-        totalDebt:      crToAbs(d['Borrowings'] ?? d['Total Debt']),
-        totalEquity:    crToAbs(d['Total Equity'] ?? d["Shareholders' Funds"] ?? d['Equity']),
-        totalLiabilities: crToAbs(d['Total Liabilities']),
-        cash:           crToAbs(d['Cash Equivalents'] ?? d['Cash & Bank Balance']),
-        currentRatio:   null, // from ratios
-      })).slice(0, 5)
-    : [];
+  // ── 5. Cash Flow ──────────────────────────────────────────────────────
+  const cf = parseDataTable($, 'cash-flow');
+  const cashFlow = cf.headers.map((year, i) => {
+    const getVal = (name) => findRow(cf.rows, name)?.values[i] ?? null;
+    const opCF = getVal('Cash from Operating Activity') ?? getVal('Operating Cash Flow');
+    const capex = getVal('Capital Expenditure') ?? getVal('CAPEX') ?? getVal('Fixed Assets Purchased');
+    return {
+      year,
+      operatingCashFlow: crToAbs(opCF),
+      capitalExpenditure: crToAbs(capex),
+      freeCashFlow: opCF != null && capex != null ? crToAbs(opCF + capex) : null,
+      dividendsPaid: crToAbs(getVal('Dividends Paid')),
+    };
+  }).slice(-5);
+  console.log(`   💸 Cash flow: ${cashFlow.length} years`);
 
-  // ── 4. Cash Flow ──────────────────────────────────────────────────────────
-  const cashYears = financials.yearly_cash_flow_statement?.headers || [];
-  const cashRows  = financials.yearly_cash_flow_statement?.rows || [];
+  // ── 6. Key Ratios Table (multi-year) ──────────────────────────────────
+  const ratiosTable = parseDataTable($, 'ratios');
+  const ratiosList = ratiosTable.rows.map((row) => ({
+    name: row.name,
+    values: ratiosTable.headers.map((year, i) => ({
+      year,
+      value: row.values[i],
+    })),
+  }));
 
-  const cashFlow = cashYears.length > 0
-    ? parseTable(cashYears, cashRows).map((d) => ({
-        year:               d.year,
-        operatingCashFlow:  crToAbs(d['Cash from Operating Activity'] ?? d['Operating Cash Flow']),
-        capitalExpenditure: crToAbs(d['Capital Expenditure'] ?? d['CAPEX']),
-        freeCashFlow:       crToAbs(d['Free Cash Flow'] ?? null),
-        dividendsPaid:      crToAbs(d['Dividends Paid'] ?? null),
-      })).slice(0, 5)
-    : [];
-
-  // ── 5. Key Metrics & Ratios ───────────────────────────────────────────────
-  // Screener exposes these as a simple key-value list in raw.ratios or raw.key_ratios
-  const ratiosList = raw.ratios || raw.key_ratios || [];
-
-  const findRatio = (name) => {
-    const r = ratiosList.find((x) =>
-      String(x.name || '').toLowerCase().includes(name.toLowerCase())
-    );
-    return r?.values?.[0]?.value != null
-      ? parseFloat(String(r.values[0].value).replace(/,/g, ''))
-      : null;
+  // Build keyMetrics from topRatios + ratios table
+  const findRatioLatest = (name) => {
+    const row = findRow(ratiosTable.rows, name);
+    if (!row) return null;
+    // Return the last non-null value
+    for (let i = row.values.length - 1; i >= 0; i--) {
+      if (row.values[i] != null) return row.values[i];
+    }
+    return null;
   };
 
   const keyMetrics = {
-    peRatio:         findRatio('Stock P/E') ?? findRatio('P/E'),
-    pbRatio:         findRatio('Price to Book') ?? findRatio('P/B'),
-    priceToSales:    findRatio('Price to Sales') ?? findRatio('P/S'),
-    evToEbitda:      findRatio('EV / EBITDA'),
-    roe:             findRatio('Return on Equity') != null ? findRatio('Return on Equity') / 100 : null,
-    roa:             null,
-    returnOnInvestedCapital: findRatio('ROCE') != null ? findRatio('ROCE') / 100 : null,
-    returnOnCapitalEmployed: findRatio('ROCE') != null ? findRatio('ROCE') / 100 : null,
-    debtToEquity:    findRatio('Debt to equity'),
-    currentRatio:    findRatio('Current ratio'),
-    dividendYield:   findRatio('Dividend Yield') != null ? findRatio('Dividend Yield') / 100 : null,
-    payoutRatio:     null,
-    quickRatio:      null,
-    interestCoverage: null,
-    netDebtToEBITDA:  null,
+    peRatio: topRatios['Stock P/E'] ?? topRatios['P/E'] ?? findRatioLatest('P/E'),
+    pbRatio: topRatios['Book Value'] && topRatios['Current Price']
+      ? +(topRatios['Current Price'] / topRatios['Book Value']).toFixed(2)
+      : findRatioLatest('Price to Book'),
+    priceToSales: findRatioLatest('Price to Sales') ?? findRatioLatest('P/S'),
+    evToEbitda: findRatioLatest('EV / EBITDA'),
+    roe: topRatios['ROE'] != null ? topRatios['ROE'] / 100 : (findRatioLatest('Return on Equity') != null ? findRatioLatest('Return on Equity') / 100 : null),
+    roa: null,
+    returnOnInvestedCapital: topRatios['ROCE'] != null ? topRatios['ROCE'] / 100 : (findRatioLatest('ROCE') != null ? findRatioLatest('ROCE') / 100 : null),
+    returnOnCapitalEmployed: topRatios['ROCE'] != null ? topRatios['ROCE'] / 100 : (findRatioLatest('ROCE') != null ? findRatioLatest('ROCE') / 100 : null),
+    debtToEquity: findRatioLatest('Debt to equity') ?? findRatioLatest('Debt to Equity'),
+    currentRatio: findRatioLatest('Current ratio') ?? findRatioLatest('Current Ratio'),
+    dividendYield: topRatios['Dividend Yield'] != null ? topRatios['Dividend Yield'] / 100 : (findRatioLatest('Dividend Yield') != null ? findRatioLatest('Dividend Yield') / 100 : null),
+    payoutRatio: findRatioLatest('Payout ratio') != null ? findRatioLatest('Payout ratio') / 100 : null,
+    quickRatio: null,
+    interestCoverage: findRatioLatest('Interest Coverage'),
+    netDebtToEBITDA: null,
   };
 
-  // ── 6. Shareholding Pattern (Indian-specific) ─────────────────────────────
-  const shareholding = raw.shareholding_pattern || null;
+  // ── 7. Quarterly Results ───────────────────────────────────────────────
+  const qr = parseDataTable($, 'quarters');
+  const quarterlyResults = qr.headers.map((quarter, i) => {
+    const getVal = (name) => findRow(qr.rows, name)?.values[i] ?? null;
+    return {
+      quarter,
+      revenue: crToAbs(getVal('Sales')),
+      operatingProfit: crToAbs(getVal('Operating Profit')),
+      netProfit: crToAbs(getVal('Net Profit')),
+      opmPercent: getVal('OPM'),
+      eps: getVal('EPS'),
+    };
+  }).slice(-8); // last 8 quarters
+  console.log(`   📅 Quarterly results: ${quarterlyResults.length} quarters`);
 
-  // ── 7. Quarterly Results ──────────────────────────────────────────────────
-  const qHeaders = raw.quarterly_income_statement?.headers || [];
-  const qRows    = raw.quarterly_income_statement?.rows || [];
-  const quarterlyResults = qHeaders.length > 0
-    ? parseTable(qHeaders, qRows).slice(0, 4)
-    : [];
+  // ── 8. Shareholding Pattern ────────────────────────────────────────────
+  let shareholding = null;
+  const shpSection = $('#shareholding').closest('section');
+  if (shpSection.length) {
+    const shpTable = shpSection.find('table.data-table').first();
+    if (shpTable.length) {
+      const shpHeaders = [];
+      shpTable.find('thead th').each((i, el) => {
+        const text = $(el).text().trim();
+        if (text && i > 0) shpHeaders.push(text);
+      });
 
-  // ── 8. Peer Comparison ────────────────────────────────────────────────────
-  const peers = (raw.peer_comparison || [])
-    .map((p) => p.symbol || p.ticker)
-    .filter(Boolean)
-    .slice(0, 5);
+      const shpRows = [];
+      shpTable.find('tbody tr').each((_, tr) => {
+        const tds = $(tr).find('td');
+        if (tds.length < 2) return;
+        const name = $(tds[0]).text().trim();
+        const values = [];
+        tds.slice(1).each((_, td) => {
+          values.push(parseIndianNum($(td).text()));
+        });
+        if (name) shpRows.push({ name, values });
+      });
 
-  // ── 9. News / Recent Updates ──────────────────────────────────────────────
-  // Screener doesn't provide news — will come from Yahoo Finance
-  const recentNews = [];
+      // Get the latest values (last column)
+      const latest = (name) => {
+        const row = shpRows.find((r) => r.name.toLowerCase().includes(name.toLowerCase()));
+        return row?.values[row.values.length - 1] ?? null;
+      };
 
-  console.log(`✅ Screener.in data fetched for ${symbol}`);
+      shareholding = {
+        promoter: latest('Promoter'),
+        fii: latest('FII') ?? latest('Foreign'),
+        dii: latest('DII') ?? latest('Domestic'),
+        public: latest('Public') ?? latest('Others'),
+        government: latest('Government'),
+        latestQuarter: shpHeaders[shpHeaders.length - 1] || null,
+        trend: shpHeaders.map((quarter, i) => ({
+          quarter,
+          promoter: shpRows.find((r) => r.name.toLowerCase().includes('promoter'))?.values[i] ?? null,
+          fii: (shpRows.find((r) => r.name.toLowerCase().includes('fii')) ?? shpRows.find((r) => r.name.toLowerCase().includes('foreign')))?.values[i] ?? null,
+          dii: (shpRows.find((r) => r.name.toLowerCase().includes('dii')) ?? shpRows.find((r) => r.name.toLowerCase().includes('domestic')))?.values[i] ?? null,
+          public: (shpRows.find((r) => r.name.toLowerCase().includes('public')) ?? shpRows.find((r) => r.name.toLowerCase().includes('others')))?.values[i] ?? null,
+        })).slice(-4),
+      };
+      console.log(`   🏛️ Shareholding: Promoter ${shareholding.promoter}%, FII ${shareholding.fii}%`);
+    }
+  }
+
+  // ── 9. Peer Companies ──────────────────────────────────────────────────
+  const peers = [];
+  const peersSection = $('#peers').closest('section');
+  if (peersSection.length) {
+    peersSection.find('table a[href*="/company/"]').each((_, a) => {
+      const href = $(a).attr('href') || '';
+      const peerSlug = href.replace(/^\/company\//, '').split('/')[0];
+      if (peerSlug && peerSlug.toUpperCase() !== toScreenerSymbol(ticker)) {
+        peers.push(peerSlug.toUpperCase());
+      }
+    });
+  }
+  console.log(`   👥 Peers: ${peers.length} found`);
 
   return {
-    source: 'screener.in',
-    symbol,
-    ticker,
     companyProfile,
     incomeStatement,
     balanceSheet,
     cashFlow,
     keyMetrics,
-    recentNews,
-    peers,
-    // Indian-specific extras
     shareholding,
     quarterlyResults,
     ratiosList,
+    peers: [...new Set(peers)].slice(0, 8),
+    topRatios, // raw top ratios for debugging / extra data
+  };
+};
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Main export: Fetch and parse Screener.in data for an Indian company
+───────────────────────────────────────────────────────────────────────────── */
+export const fetchScreenerData = async (ticker) => {
+  const symbol = toScreenerSymbol(ticker);
+  console.log(`🇮🇳 Screener.in: Fetching data for ${symbol} (from ${ticker})...`);
+
+  // Step 1: Resolve the correct Screener.in slug
+  const { slug, consolidated } = await resolveScreenerSlug(symbol);
+
+  // Step 2: Fetch the HTML page
+  let html;
+  try {
+    html = await fetchScreenerHTML(slug, consolidated);
+  } catch (err) {
+    console.warn(`⚠️ Screener.in HTML fetch failed for ${slug}: ${err.message}`);
+    return null;
+  }
+
+  if (!html) {
+    console.warn(`⚠️ Screener.in: No valid HTML page found for ${symbol}`);
+    return null;
+  }
+
+  // Step 3: Parse with cheerio
+  const $ = cheerio.load(html);
+  const parsed = parseScreenerHTML($, ticker);
+
+  console.log(`✅ Screener.in data fetched for ${symbol} (HTML scraping)`);
+
+  return {
+    source: 'screener.in',
+    symbol,
+    ticker,
+    ...parsed,
+    recentNews: [],
     currency: 'INR',
   };
 };

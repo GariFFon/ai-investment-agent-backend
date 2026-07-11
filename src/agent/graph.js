@@ -105,19 +105,53 @@ ${
 `;
 
   // Build Indian-specific data section
-  const indianSection = isIndian && data.indianData ? `
+  const indianSection = isIndian && data.indianData ? (() => {
+    // Build a concise shareholding summary with trend
+    const shp = data.indianData.shareholding;
+    let shpSummary = 'Not available';
+    if (shp) {
+      shpSummary = `Latest (${shp.latestQuarter || 'N/A'}): Promoter: ${shp.promoter ?? 'N/A'}% | FII: ${shp.fii ?? 'N/A'}% | DII: ${shp.dii ?? 'N/A'}% | Public: ${shp.public ?? 'N/A'}%`;
+      if (shp.trend?.length > 1) {
+        const first = shp.trend[0];
+        const last = shp.trend[shp.trend.length - 1];
+        const promoterDelta = first.promoter != null && last.promoter != null ? (last.promoter - first.promoter).toFixed(2) : null;
+        const fiiDelta = first.fii != null && last.fii != null ? (last.fii - first.fii).toFixed(2) : null;
+        shpSummary += `\nTrend (${first.quarter} → ${last.quarter}): Promoter ${promoterDelta > 0 ? '+' : ''}${promoterDelta}% | FII ${fiiDelta > 0 ? '+' : ''}${fiiDelta}%`;
+      }
+    }
+
+    // Build quarterly momentum summary
+    const quarters = data.indianData.quarterlyResults ?? [];
+    let qMomentum = '';
+    if (quarters.length >= 2) {
+      const latest = quarters[quarters.length - 1];
+      const prev = quarters[quarters.length - 2];
+      const revGrowth = latest.revenue && prev.revenue ? ((latest.revenue - prev.revenue) / prev.revenue * 100).toFixed(1) : null;
+      const profitGrowth = latest.netProfit && prev.netProfit ? ((latest.netProfit - prev.netProfit) / prev.netProfit * 100).toFixed(1) : null;
+      qMomentum = `\nQuarterly Momentum (${prev.quarter} → ${latest.quarter}): Revenue ${revGrowth ? (revGrowth > 0 ? '+' : '') + revGrowth + '%' : 'N/A'} | Net Profit ${profitGrowth ? (profitGrowth > 0 ? '+' : '') + profitGrowth + '%' : 'N/A'} | OPM: ${latest.opmPercent ?? 'N/A'}%`;
+    }
+
+    return `
 ## Indian Company — Additional Data
 Market: NSE/BSE (India) | Currency: Indian Rupees (₹) | All figures in Crores unless noted.
 
 ### Shareholding Pattern
-${JSON.stringify(data.indianData.shareholding ?? 'Not available', null, 2)}
+${shpSummary}
 
-### Latest Quarterly Results (Last 4 Quarters)
-${JSON.stringify(data.indianData.quarterlyResults ?? [], null, 2)}
+### Full Shareholding Trend (Quarterly)
+${JSON.stringify(shp?.trend ?? [], null, 2)}
 
-### Key Ratios from Screener.in
-${JSON.stringify(data.indianData.ratiosList?.slice(0, 15) ?? [], null, 2)}
-` : '';
+### Latest Quarterly Results (Last 8 Quarters)
+${JSON.stringify(quarters, null, 2)}
+${qMomentum}
+
+### Key Ratios from Screener.in (Historical, Multi-Year)
+${JSON.stringify(data.indianData.ratiosList?.slice(0, 20) ?? [], null, 2)}
+
+### Data Source
+${data.indianData.dataSource ?? 'screener.in + yahoo-finance'}
+`;
+  })() : '';
 
   const dataPrompt = `
 You are analyzing the company "${companyName}" (Ticker: ${data.ticker}).
