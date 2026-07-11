@@ -1,4 +1,4 @@
-# InvestIQ — Data Sources & Feature Suggestions
+# IntellyInvest — Data Sources & Feature Suggestions
 
 ## 🔵 Current Data Sources
 

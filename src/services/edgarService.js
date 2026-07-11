@@ -14,7 +14,7 @@ import axios from 'axios';
  */
 
 const EDGAR_HEADERS = {
-  'User-Agent': 'InvestIQ research@investiq.app',
+  'User-Agent': 'IntellyInvest research@intellyinvest.app',
   'Accept': 'application/json',
 };
 

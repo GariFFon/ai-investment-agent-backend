@@ -1,4 +1,4 @@
-# InvestIQ — AI Investment Research Agent
+# IntellyInvest — AI Investment Research Agent
 
 > Built for the InsideIIM × Altuni AI Labs — AI Product Intern Assignment.
 
@@ -6,7 +6,7 @@
 
 ## Overview
 
-**InvestIQ** is a full-stack AI-powered investment research agent. Given any publicly listed company name, it autonomously gathers financial data from multiple sources, cross-validates it, and produces a structured **INVEST / HOLD / PASS** verdict with full quantitative reasoning — in seconds.
+**IntellyInvest** is a full-stack AI-powered investment research agent. Given any publicly listed company name, it autonomously gathers financial data from multiple sources, cross-validates it, and produces a structured **INVEST / HOLD / PASS** verdict with full quantitative reasoning — in seconds.
 
 ### What it does
 
