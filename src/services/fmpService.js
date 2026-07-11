@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { fetchYahooData } from './yahooService.js';
 import { fetchEdgarData } from './edgarService.js';
+import { isIndianTicker, gatherIndianCompanyData } from './indianDataService.js';
 
 const FMP_BASE = 'https://financialmodelingprep.com/stable';
 const key = () => process.env.FMP_API_KEY;
@@ -372,6 +373,13 @@ export const gatherCompanyData = async (companyName, preferredTicker = null) => 
     console.log(`✅ Ticker resolved: ${ticker}`);
   }
 
+  // ── SMART ROUTING: Indian vs US pipeline ─────────────────────────────────
+  if (isIndianTicker(ticker)) {
+    console.log(`🇮🇳 Smart routing: Detected Indian ticker ${ticker} → using Screener.in pipeline`);
+    return gatherIndianCompanyData(ticker);
+  }
+
+  // ── US PIPELINE: FMP + Yahoo Finance + SEC EDGAR ──────────────────────────
   // Fetch FMP + Yahoo Finance + SEC EDGAR data all in parallel
   console.log(`📊 Fetching FMP + Yahoo Finance + SEC EDGAR data for ${ticker} in parallel...`);
   const [fmpData, yahooData, edgarData] = await Promise.all([

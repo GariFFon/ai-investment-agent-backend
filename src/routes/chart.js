@@ -16,6 +16,16 @@ const RANGE_MAP = {
 };
 
 /**
+ * For Indian exchanges (BSE/NSE), Yahoo Finance works much better
+ * with a date string for period1 rather than a Date object.
+ * Also, intraday intervals (5m, 1h) are often unavailable for Indian tickers
+ * outside market hours — we fall back to '1d' in those cases.
+ */
+const isIndianTicker = (ticker) => /\.(NS|BO)$/i.test(ticker);
+
+const toDateString = (date) => date.toISOString().split('T')[0]; // "YYYY-MM-DD"
+
+/**
  * GET /api/chart/:ticker?range=1Y
  * Returns historical OHLCV quotes + meta (52w range, currency, current price)
  */
@@ -24,15 +34,33 @@ router.get('/:ticker', async (req, res) => {
   const range = req.query.range || '1Y';
   const cfg = RANGE_MAP[range] || RANGE_MAP['1Y'];
 
-  const period1 = new Date(Date.now() - cfg.days * 24 * 60 * 60 * 1000);
+  const period1Date = new Date(Date.now() - cfg.days * 24 * 60 * 60 * 1000);
+  const indian = isIndianTicker(ticker);
+
+  // Use a date string for Indian tickers — Yahoo Finance handles BSE/NSE better this way
+  const period1 = indian ? toDateString(period1Date) : period1Date;
+
+  // Intraday intervals (5m, 1h) are unreliable for Indian tickers outside market hours.
+  // Fall back to '1d' for them.
+  const interval = (indian && (cfg.interval === '5m' || cfg.interval === '1h'))
+    ? '1d'
+    : cfg.interval;
 
   try {
-    console.log(`📈 Chart: fetching ${ticker} range=${range} interval=${cfg.interval}`);
+    console.log(`📈 Chart: fetching ${ticker} range=${range} interval=${interval} period1=${period1}`);
 
-    const raw = await yahooFinance.chart(ticker, {
-      period1,
-      interval: cfg.interval,
-    });
+    let raw;
+    try {
+      raw = await yahooFinance.chart(ticker, { period1, interval });
+    } catch (primaryErr) {
+      // If the preferred interval fails for Indian tickers, retry with '1d'
+      if (indian && interval !== '1d') {
+        console.warn(`⚠️ Chart: ${interval} failed for Indian ticker ${ticker}, retrying with 1d...`);
+        raw = await yahooFinance.chart(ticker, { period1, interval: '1d' });
+      } else {
+        throw primaryErr;
+      }
+    }
 
     if (!raw || !raw.quotes) {
       return res.status(404).json({ error: 'No price data available for this ticker.' });
@@ -52,10 +80,12 @@ router.get('/:ticker', async (req, res) => {
 
     const meta = raw.meta ?? {};
 
+    console.log(`✅ Chart: ${quotes.length} data points for ${ticker} (${range})`);
+
     return res.json({
       ticker: ticker.toUpperCase(),
       range,
-      interval: cfg.interval,
+      interval,
       quotes,
       meta: {
         currency:              meta.currency,

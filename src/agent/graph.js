@@ -12,8 +12,11 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
  *   3. Call Gemini ONCE to produce the analysis JSON
  */
 export const runAnalysisAgent = async (companyName, preferredTicker = null) => {
-  // ── Step 1: Gather all data from FMP (parallel, no Gemini involved) ──────────
+  // ── Step 1: Gather all data from FMP APIs (or Screener.in for Indian companies) ─
   const data = await gatherCompanyData(companyName, preferredTicker);
+
+  const isIndian = data.market === 'INDIA';
+  const currencySymbol = isIndian ? '₹' : '$';
 
   // ── Step 2: Build a single rich prompt with all data embedded ────────────────
   // Build Yahoo Finance supplemental section
@@ -90,9 +93,10 @@ ${JSON.stringify(edgarFacts?.sharesHistory?.slice(0, 3) ?? [], null, 2)}
   // Build cross-source comparison summary for Gemini
   const cs = data.crossSource ?? {};
   const lowAgreements = Object.values(cs).filter(p => p.agreement === 'LOW');
+  const sourceNames = isIndian ? 'Screener.in and Yahoo Finance' : 'FMP, Yahoo Finance, and SEC EDGAR';
   const crossSourceSection = `
 ## Cross-Source Data Agreement Summary
-Data was collected from up to 3 sources: FMP, Yahoo Finance, and SEC EDGAR.
+Data was collected from: ${sourceNames}.
 ${
   lowAgreements.length > 0
     ? `⚠️ LOW AGREEMENT detected on: ${lowAgreements.map(p => p.label).join(', ')}. Consider mentioning data confidence caveats.`
@@ -100,24 +104,40 @@ ${
 }
 `;
 
+  // Build Indian-specific data section
+  const indianSection = isIndian && data.indianData ? `
+## Indian Company — Additional Data
+Market: NSE/BSE (India) | Currency: Indian Rupees (₹) | All figures in Crores unless noted.
+
+### Shareholding Pattern
+${JSON.stringify(data.indianData.shareholding ?? 'Not available', null, 2)}
+
+### Latest Quarterly Results (Last 4 Quarters)
+${JSON.stringify(data.indianData.quarterlyResults ?? [], null, 2)}
+
+### Key Ratios from Screener.in
+${JSON.stringify(data.indianData.ratiosList?.slice(0, 15) ?? [], null, 2)}
+` : '';
+
   const dataPrompt = `
 You are analyzing the company "${companyName}" (Ticker: ${data.ticker}).
+${isIndian ? `Market: INDIA (NSE/BSE) | Currency: Indian Rupees (₹) | Use Indian number formatting (Crores, Lakhs).` : `Market: US (NYSE/NASDAQ) | Currency: USD ($).`}
 
 Here is all the financial data you need. Use it to produce your investment analysis.
 
 ## Company Profile
 ${JSON.stringify(data.companyProfile, null, 2)}
 
-## Income Statement (Last 3 Years)
+## Income Statement (Last 3–5 Years)
 ${JSON.stringify(data.incomeStatement, null, 2)}
 
-## Balance Sheet (Last 3 Years)
+## Balance Sheet (Last 3–5 Years)
 ${JSON.stringify(data.balanceSheet, null, 2)}
 
-## Cash Flow Statement (Last 3 Years)
+## Cash Flow Statement (Last 3–5 Years)
 ${JSON.stringify(data.cashFlow, null, 2)}
 
-## Key Metrics & Valuation Ratios (FMP)
+## Key Metrics & Valuation Ratios
 ${JSON.stringify(data.keyMetrics, null, 2)}
 
 ## Recent News (Last 8 Articles)
@@ -127,6 +147,7 @@ ${JSON.stringify(data.recentNews, null, 2)}
 ${JSON.stringify(data.peers)}
 ${yahooSection}
 ${edgarSection}
+${indianSection}
 ${crossSourceSection}
 ---
 
