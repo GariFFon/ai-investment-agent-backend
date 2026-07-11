@@ -418,6 +418,32 @@ export const fetchScreenerData = async (ticker) => {
   const $ = cheerio.load(html);
   const parsed = parseScreenerHTML($, ticker);
 
+  // Step 4: Fetch peers from API if not found in static HTML
+  if (parsed.peers.length === 0) {
+    const companyId = $('body').attr('data-company-id') || $('#company-info').attr('data-company-id');
+    if (companyId) {
+      try {
+        const { data: peersHtml } = await axios.get(`${SCREENER_BASE}/api/company/${companyId}/peers/`, {
+          headers: SCREENER_HEADERS,
+          timeout: 10000,
+        });
+        const $peers = cheerio.load(peersHtml);
+        const peers = [];
+        $peers('table a[href*="/company/"]').each((_, a) => {
+          const href = $peers(a).attr('href') || '';
+          const peerSlug = href.replace(/^\/company\//, '').split('/')[0];
+          if (peerSlug && peerSlug.toUpperCase() !== symbol) {
+            peers.push(peerSlug.toUpperCase());
+          }
+        });
+        parsed.peers = [...new Set(peers)].slice(0, 8);
+        console.log(`   👥 Peers (API): ${parsed.peers.length} found`);
+      } catch (err) {
+        console.warn(`⚠️ Screener.in peers API fetch failed: ${err.message}`);
+      }
+    }
+  }
+
   console.log(`✅ Screener.in data fetched for ${symbol} (HTML scraping)`);
 
   return {
