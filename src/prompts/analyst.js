@@ -21,7 +21,7 @@ You MUST respond with a valid JSON object (and nothing else) in this exact struc
 {
   "ticker": "SYMBOL",
   "companyName": "Full Company Name",
-  "verdict": "INVEST" | "PASS" | "HOLD",
+  "verdict": "INVEST" | "PASS",
   "confidence": <number 0-100>,
   "strengths": ["strength 1", "strength 2", "strength 3", "strength 4"],
   "risks": ["risk 1", "risk 2", "risk 3"],
@@ -50,8 +50,7 @@ You MUST respond with a valid JSON object (and nothing else) in this exact struc
 ## Decision Guidelines
 
 - **INVEST**: Strong fundamentals, reasonable valuation, clear competitive moat, growing business
-- **HOLD**: Good company but overvalued, or mixed signals — wait for better entry
-- **PASS**: Poor fundamentals, declining business, excessive debt, or no moat
+- **PASS**: Poor fundamentals, declining business, excessive debt, no moat, overvalued, or mixed/uncertain signals
 
 ## Indian Company Guidelines (apply when market = INDIA or exchange = NSE/BSE)
 

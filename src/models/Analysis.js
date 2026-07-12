@@ -4,7 +4,7 @@ const analysisSchema = new mongoose.Schema({
   ticker: { type: String, required: true, uppercase: true },
   companyName: { type: String, required: true },
   fetchedAt: { type: Date, default: Date.now },   // TTL index on this
-  verdict: { type: String, enum: ['INVEST', 'PASS', 'HOLD'], required: true },
+  verdict: { type: String, enum: ['INVEST', 'PASS'], required: true },
   confidence: { type: Number, min: 0, max: 100 },
   strengths: [String],
   risks: [String],
