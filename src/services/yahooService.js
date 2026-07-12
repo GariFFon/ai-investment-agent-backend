@@ -1,6 +1,8 @@
 import YahooFinance from 'yahoo-finance2';
 const yahooFinance = new YahooFinance({ suppressNotices: ['yahooSurvey'] });
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 /**
  * Fetch comprehensive company data from Yahoo Finance (free, no API key needed).
  * Supplements FMP data with analyst ratings, earnings estimates,
@@ -24,20 +26,35 @@ export const fetchYahooData = async (ticker) => {
     'earnings',
   ];
 
+  // Retry with exponential backoff to handle Yahoo's 429 rate-limiting on crumb fetch
+  const MAX_RETRIES = 3;
   let raw;
-  try {
-    raw = await yahooFinance.quoteSummary(ticker, { modules });
-  } catch (err) {
-    console.warn(`⚠️ Yahoo Finance full fetch failed for ${ticker}: ${err.message}`);
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
-      raw = await yahooFinance.quoteSummary(ticker, {
-        modules: ['summaryProfile', 'financialData', 'defaultKeyStatistics'],
-      });
-    } catch (err2) {
-      console.error(`❌ Yahoo Finance fallback also failed: ${err2.message}`);
-      return null;
+      raw = await yahooFinance.quoteSummary(ticker, { modules });
+      break; // success
+    } catch (err) {
+      const is429 = err.message?.includes('429') || err.message?.includes('Too Many Requests');
+      if (is429 && attempt < MAX_RETRIES) {
+        const delay = attempt * 2000; // 2s, 4s, 6s
+        console.warn(`⚠️ Yahoo Finance rate-limited (429) for ${ticker}. Retrying in ${delay / 1000}s... (attempt ${attempt}/${MAX_RETRIES})`);
+        await sleep(delay);
+        continue;
+      }
+      // Not a 429, or out of retries — try stripped-down fallback
+      console.warn(`⚠️ Yahoo Finance full fetch failed for ${ticker}: ${err.message}`);
+      try {
+        raw = await yahooFinance.quoteSummary(ticker, {
+          modules: ['summaryProfile', 'financialData', 'defaultKeyStatistics'],
+        });
+        break;
+      } catch (err2) {
+        console.error(`❌ Yahoo Finance fallback also failed: ${err2.message}`);
+        return null;
+      }
     }
   }
+
 
   // Fetch fundamentals time series separately (best post-Nov 2024 source)
   let fundamentals = null;
