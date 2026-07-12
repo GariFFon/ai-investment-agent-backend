@@ -62,6 +62,28 @@ router.get('/:ticker', async (req, res) => {
       }
     }
 
+    // BSE (.BO) tickers often return very few data points from Yahoo Finance
+    // while the same company's NSE (.NS) ticker has full history.
+    // If we got ≤3 data points for a .BO ticker, retry with .NS equivalent.
+    if (indian && ticker.toUpperCase().endsWith('.BO')) {
+      const quotesCount = (raw?.quotes ?? []).filter(q => q.close != null).length;
+      if (quotesCount <= 3) {
+        const nsTicker = ticker.replace(/\.BO$/i, '.NS');
+        console.warn(`⚠️ Chart: Only ${quotesCount} data points for ${ticker} (BSE). Retrying with NSE equivalent: ${nsTicker}`);
+        try {
+          const nsRaw = await yahooFinance.chart(nsTicker, { period1, interval });
+          const nsCount = (nsRaw?.quotes ?? []).filter(q => q.close != null).length;
+          if (nsCount > quotesCount) {
+            console.log(`✅ Chart: NSE fallback succeeded — ${nsCount} data points for ${nsTicker}`);
+            raw = nsRaw;
+          }
+        } catch (nsErr) {
+          console.warn(`⚠️ Chart: NSE fallback also failed for ${nsTicker}: ${nsErr.message}`);
+          // Keep the original (sparse) result — better than nothing
+        }
+      }
+    }
+
     if (!raw || !raw.quotes) {
       return res.status(404).json({ error: 'No price data available for this ticker.' });
     }
