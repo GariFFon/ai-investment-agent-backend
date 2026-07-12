@@ -31,8 +31,7 @@ const analysisSchema = new mongoose.Schema({
   rawData: { type: mongoose.Schema.Types.Mixed },  // full FMP response cached
 });
 
-// Auto-delete documents 30 days after fetchedAt (2592000s = 30 days)
-analysisSchema.index({ fetchedAt: 1 }, { expireAfterSeconds: 2592000 });
+// Data is retained indefinitely — no auto-deletion. Admin must manually delete records.
 
 // Unique per ticker (upsert on re-fetch)
 analysisSchema.index({ ticker: 1 });
