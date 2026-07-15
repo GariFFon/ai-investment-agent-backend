@@ -25,7 +25,7 @@ app.use('/api/chart', chartRouter);
 app.use('/api/news', newsRouter);
 
 // Health check
-app.get('/health', (_, res) => res.json({ status: 'ok' }));
+app.get('/health', (_, res) => res.json({ status: 'ok, Good to Go..!!' }));
 
 // ── Start ──────────────────────────────────────────────────────────────────
 connectDB().then(() => {
