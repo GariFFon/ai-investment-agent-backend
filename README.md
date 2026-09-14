@@ -1,7 +1,5 @@
 # IntellyInvest — AI Investment Research Agent
 
-> Built for the InsideIIM × Altuni AI Labs — AI Product Intern Assignment.
-
 ---
 
 ## Overview
